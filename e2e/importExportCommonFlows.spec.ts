@@ -186,10 +186,18 @@ async function installWebdavBackupRoute(
 
     if (method === "GET" && (isBackupFile || isTempBackupFile)) {
       const body = isTempBackupFile ? stagedBackups.get(url.href) : remoteBackup
+      if (body === undefined || (!isTempBackupFile && !remoteBackup)) {
+        await route.fulfill({
+          status: 404,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "backup not found" }),
+        })
+        return
+      }
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: body || "{}",
+        body,
       })
       return
     }

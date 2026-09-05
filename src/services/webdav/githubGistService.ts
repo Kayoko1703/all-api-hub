@@ -17,8 +17,8 @@ import {
  * truncated). See https://docs.github.com/en/rest/gists/gists.
  */
 export const GITHUB_GIST_BACKUP_FILE_NAME = "all-api-hub-backup.json"
-export const GITHUB_GIST_API_ORIGIN = "https://api.github.com"
-export const GITHUB_GIST_API_VERSION = "2022-11-28"
+const GITHUB_GIST_API_ORIGIN = "https://api.github.com"
+const GITHUB_GIST_API_VERSION = "2022-11-28"
 
 export interface GitHubGistRemote {
   gistId: string
@@ -28,11 +28,11 @@ export interface GitHubGistRemote {
   rawContent: string
 }
 
-export interface GitHubGistSyncConfig extends GitHubGistSettings {
+interface GitHubGistSyncConfig extends GitHubGistSettings {
   encryptionPassword: string
 }
 
-export class GitHubGistError extends Error {
+class GitHubGistError extends Error {
   override readonly name = "GitHubGistError"
 
   constructor(
@@ -376,7 +376,7 @@ export async function testGithubGistConnection(
 }
 
 /** Create a Secret Gist containing the already encrypted first backup. */
-export async function createGithubGistBackup(
+async function createGithubGistBackup(
   content: string,
   config: GitHubGistSyncConfig,
 ): Promise<GitHubGistRemote> {
@@ -523,9 +523,4 @@ export function getGithubGistSyncConfig(
     ...(settings.githubGist ?? { token: "", gistId: "" }),
     encryptionPassword: settings.backupEncryptionPassword ?? "",
   }
-}
-
-/** Type guard for provider errors surfaced to UI and background callers. */
-export function isGithubGistError(error: unknown): error is GitHubGistError {
-  return error instanceof GitHubGistError
 }

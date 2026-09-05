@@ -36,7 +36,6 @@ vi.mock("~/services/webdav/githubGistService", () => ({
   createEncryptedGithubGistBackup: mockCreateEncryptedGithubGistBackup,
   downloadGithubGistBackup: mockDownloadGithubGistBackup,
   getGithubGistSyncConfig: mockGetGithubGistSyncConfig,
-  isGithubGistError: () => false,
   testGithubGistConnection: mockTestGithubGistConnection,
   uploadGithubGistBackup: mockUploadGithubGistBackup,
 }))

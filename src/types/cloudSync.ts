@@ -41,12 +41,3 @@ export const CLOUD_SYNC_ERROR_CODES = {
 
 export type CloudSyncErrorCode =
   (typeof CLOUD_SYNC_ERROR_CODES)[keyof typeof CLOUD_SYNC_ERROR_CODES]
-
-export interface CloudSyncStatus {
-  provider: CloudSyncProvider
-  status: "idle" | "running" | "success" | "error"
-  lastSyncTime: number
-  errorCode?: CloudSyncErrorCode
-  retryAt?: number
-  remoteRevision?: string
-}

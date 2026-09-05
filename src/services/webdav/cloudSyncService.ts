@@ -5,7 +5,6 @@ import {
   createEncryptedGithubGistBackup,
   downloadGithubGistBackup,
   getGithubGistSyncConfig,
-  isGithubGistError,
   testGithubGistConnection,
   uploadGithubGistBackup,
   type GitHubGistRemote,
@@ -136,5 +135,3 @@ export async function createCloudSyncBackup(
     rawContent: remote.rawContent,
   }
 }
-
-export { isGithubGistError }

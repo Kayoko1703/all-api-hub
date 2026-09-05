@@ -1,16 +1,17 @@
-import { afterEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import {
   createEncryptedGithubGistBackup,
   downloadGithubGistBackup,
+  getGithubGistSyncConfig,
   GITHUB_GIST_BACKUP_FILE_NAME,
-  isGithubGistError,
   readGithubGistRemote,
   testGithubGistConnection,
   updateGithubGistBackup,
   uploadGithubGistBackup,
 } from "~/services/webdav/githubGistService"
 import { CLOUD_SYNC_ERROR_CODES } from "~/types/cloudSync"
+import { DEFAULT_WEBDAV_SETTINGS } from "~/types/webdav"
 
 const {
   mockDecryptWebdavBackupEnvelope,
@@ -63,7 +64,27 @@ function gistResponse(content = '{"version":4}', revision = "rev-1") {
   }
 }
 
+function truncatedGistResponse(
+  rawUrl: unknown = "https://gist.githubusercontent.com/example/raw",
+) {
+  return {
+    ...gistResponse("", "rev-truncated"),
+    files: {
+      [GITHUB_GIST_BACKUP_FILE_NAME]: {
+        truncated: true,
+        raw_url: rawUrl,
+      },
+    },
+  }
+}
+
 describe("githubGistService", () => {
+  beforeEach(() => {
+    mockDecryptWebdavBackupEnvelope.mockReset()
+    mockEncryptWebdavBackupContent.mockReset()
+    mockTryParseEncryptedWebdavBackupEnvelope.mockReset()
+  })
+
   afterEach(() => {
     vi.restoreAllMocks()
     vi.unstubAllGlobals()
@@ -150,14 +171,196 @@ describe("githubGistService", () => {
     await expect(
       readGithubGistRemote({ token: "token", gistId: "gist-1" }),
     ).rejects.toMatchObject({ code: CLOUD_SYNC_ERROR_CODES.NETWORK })
+
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(response(truncatedGistResponse()))
+        .mockResolvedValueOnce(response({}, 503)),
+    )
+    await expect(
+      readGithubGistRemote({ token: "token", gistId: "gist-1" }),
+    ).rejects.toMatchObject({ code: CLOUD_SYNC_ERROR_CODES.REMOTE_UNAVAILABLE })
+  })
+
+  it("validates token and accepts only safe Gist identifiers", async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal("fetch", fetchMock)
+
+    for (const config of [
+      { token: "", gistId: "gist-1" },
+      { token: "token", gistId: "" },
+      { token: "token", gistId: "not a gist id" },
+      { token: "token", gistId: "https://example.com/gist-1" },
+      { token: "token", gistId: "https://gist.github.com/" },
+      { token: "token", gistId: "http://[invalid" },
+    ]) {
+      await expect(readGithubGistRemote(config)).rejects.toMatchObject({
+        code: CLOUD_SYNC_ERROR_CODES.CONFIG_INCOMPLETE,
+      })
+    }
+
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it("maps permission, reset-header, server, and generic HTTP failures", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(response({}, 403))
+      .mockResolvedValueOnce(
+        response({}, 403, {
+          "x-ratelimit-remaining": "0",
+          "x-ratelimit-reset": "123",
+        }),
+      )
+      .mockResolvedValueOnce(response({}, 500))
+      .mockResolvedValueOnce(response({}, 400))
+    vi.stubGlobal("fetch", fetchMock)
+
+    await expect(
+      readGithubGistRemote({ token: "token", gistId: "gist-1" }),
+    ).rejects.toMatchObject({ code: CLOUD_SYNC_ERROR_CODES.PERMISSION_DENIED })
+    await expect(
+      readGithubGistRemote({ token: "token", gistId: "gist-1" }),
+    ).rejects.toMatchObject({
+      code: CLOUD_SYNC_ERROR_CODES.RATE_LIMITED,
+      retryAt: 123_000,
+    })
+    await expect(
+      readGithubGistRemote({ token: "token", gistId: "gist-1" }),
+    ).rejects.toMatchObject({ code: CLOUD_SYNC_ERROR_CODES.REMOTE_UNAVAILABLE })
+    await expect(
+      readGithubGistRemote({ token: "token", gistId: "gist-1" }),
+    ).rejects.toMatchObject({ code: CLOUD_SYNC_ERROR_CODES.REMOTE_UNAVAILABLE })
   })
 
   it("rejects malformed successful API responses as remote corruption", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response(null)))
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(response(null))
+        .mockResolvedValueOnce(response([])),
+    )
 
     await expect(
       readGithubGistRemote({ token: "token", gistId: "gist-1" }),
     ).rejects.toMatchObject({ code: CLOUD_SYNC_ERROR_CODES.REMOTE_CORRUPTED })
+    await expect(
+      readGithubGistRemote({ token: "token", gistId: "gist-1" }),
+    ).rejects.toMatchObject({ code: CLOUD_SYNC_ERROR_CODES.REMOTE_CORRUPTED })
+  })
+
+  it("rejects incomplete files and falls back safely when optional metadata is absent", async () => {
+    const validFile = {
+      [GITHUB_GIST_BACKUP_FILE_NAME]: { content: "backup", truncated: false },
+    }
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(response({ ...gistResponse(), files: null }))
+        .mockResolvedValueOnce(
+          response({
+            ...gistResponse(),
+            files: {
+              [GITHUB_GIST_BACKUP_FILE_NAME]: { truncated: true },
+            },
+          }),
+        )
+        .mockResolvedValueOnce(
+          response({
+            ...gistResponse(),
+            files: {
+              [GITHUB_GIST_BACKUP_FILE_NAME]: { truncated: false },
+            },
+          }),
+        )
+        .mockResolvedValueOnce(
+          response({
+            ...gistResponse(),
+            id: 123,
+            html_url: 123,
+            history: [{ version: 123 }],
+            updated_at: "fallback-revision",
+            files: validFile,
+          }),
+        )
+        .mockResolvedValueOnce(
+          response({
+            ...gistResponse(),
+            id: 123,
+            html_url: null,
+            history: [{ version: "" }],
+            updated_at: 123,
+            files: validFile,
+          }),
+        ),
+    )
+
+    for (const expectedCode of [
+      CLOUD_SYNC_ERROR_CODES.REMOTE_CORRUPTED,
+      CLOUD_SYNC_ERROR_CODES.REMOTE_CORRUPTED,
+      CLOUD_SYNC_ERROR_CODES.REMOTE_CORRUPTED,
+    ]) {
+      await expect(
+        readGithubGistRemote({ token: "token", gistId: "gist-1" }),
+      ).rejects.toMatchObject({ code: expectedCode })
+    }
+
+    await expect(
+      readGithubGistRemote({ token: "token", gistId: "gist-1" }),
+    ).resolves.toMatchObject({
+      gistId: "gist-1",
+      htmlUrl: "",
+      revision: "fallback-revision",
+    })
+    await expect(
+      readGithubGistRemote({ token: "token", gistId: "gist-1" }),
+    ).resolves.toMatchObject({ gistId: "gist-1", htmlUrl: "", revision: "" })
+  })
+
+  it("rejects invalid API JSON and unsafe or unreadable truncated files", async () => {
+    const invalidJsonResponse = response({})
+    invalidJsonResponse.json = async () => {
+      throw new Error("invalid JSON")
+    }
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(invalidJsonResponse)
+        .mockResolvedValueOnce(response(truncatedGistResponse("not a URL")))
+        .mockResolvedValueOnce(
+          response(truncatedGistResponse("https://example.com/raw")),
+        )
+        .mockResolvedValueOnce(response(truncatedGistResponse()))
+        .mockResolvedValueOnce(response("raw-content"))
+        .mockResolvedValueOnce(response(truncatedGistResponse()))
+        .mockResolvedValueOnce(response(""))
+        .mockResolvedValueOnce(response(truncatedGistResponse()))
+        .mockRejectedValueOnce(new Error("raw socket failed")),
+    )
+
+    await expect(
+      readGithubGistRemote({ token: "token", gistId: "gist-1" }),
+    ).rejects.toMatchObject({ code: CLOUD_SYNC_ERROR_CODES.REMOTE_UNAVAILABLE })
+    await expect(
+      readGithubGistRemote({ token: "token", gistId: "gist-1" }),
+    ).rejects.toMatchObject({ code: CLOUD_SYNC_ERROR_CODES.REMOTE_CORRUPTED })
+    await expect(
+      readGithubGistRemote({ token: "token", gistId: "gist-1" }),
+    ).rejects.toMatchObject({ code: CLOUD_SYNC_ERROR_CODES.REMOTE_CORRUPTED })
+    await expect(
+      readGithubGistRemote({ token: "token", gistId: "gist-1" }),
+    ).resolves.toMatchObject({ rawContent: "raw-content" })
+    await expect(
+      readGithubGistRemote({ token: "token", gistId: "gist-1" }),
+    ).rejects.toMatchObject({ code: CLOUD_SYNC_ERROR_CODES.REMOTE_EMPTY })
+    await expect(
+      readGithubGistRemote({ token: "token", gistId: "gist-1" }),
+    ).rejects.toMatchObject({ code: CLOUD_SYNC_ERROR_CODES.NETWORK })
   })
 
   it("creates an unlisted Gist only after encrypting the payload", async () => {
@@ -199,6 +402,39 @@ describe("githubGistService", () => {
     )
   })
 
+  it("rejects a blank token and an invalid Secret Gist creation response", async () => {
+    mockEncryptWebdavBackupContent.mockResolvedValue({ type: "encrypted" })
+
+    await expect(
+      createEncryptedGithubGistBackup('{"version":4}', {
+        token: " ",
+        gistId: "",
+        encryptionPassword: "password",
+      }),
+    ).rejects.toMatchObject({ code: CLOUD_SYNC_ERROR_CODES.CONFIG_INCOMPLETE })
+
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(response({ id: "gist-1", public: true }, 201))
+      .mockResolvedValueOnce(response({ public: false }, 201))
+    vi.stubGlobal("fetch", fetchMock)
+
+    await expect(
+      createEncryptedGithubGistBackup('{"version":4}', {
+        token: "token",
+        gistId: "",
+        encryptionPassword: "password",
+      }),
+    ).rejects.toMatchObject({ code: CLOUD_SYNC_ERROR_CODES.REMOTE_UNAVAILABLE })
+    await expect(
+      createEncryptedGithubGistBackup('{"version":4}', {
+        token: "token",
+        gistId: "",
+        encryptionPassword: "password",
+      }),
+    ).rejects.toMatchObject({ code: CLOUD_SYNC_ERROR_CODES.REMOTE_UNAVAILABLE })
+  })
+
   it("updates an existing Gist only when the revision is unchanged and verifies readback", async () => {
     const fetchMock = vi
       .fn()
@@ -231,6 +467,56 @@ describe("githubGistService", () => {
     expect(conflictFetch).toHaveBeenCalledTimes(1)
   })
 
+  it("rejects empty updates and detects a failed readback verification", async () => {
+    const emptyFetch = vi.fn().mockResolvedValue(response(gistResponse()))
+    vi.stubGlobal("fetch", emptyFetch)
+    await expect(
+      updateGithubGistBackup({
+        content: "  ",
+        config: { token: "token", gistId: "gist-1" },
+      }),
+    ).rejects.toMatchObject({ code: CLOUD_SYNC_ERROR_CODES.REMOTE_EMPTY })
+    expect(emptyFetch).toHaveBeenCalledTimes(1)
+
+    const mismatchFetch = vi
+      .fn()
+      .mockResolvedValueOnce(response(gistResponse("before")))
+      .mockResolvedValueOnce(response({}))
+      .mockResolvedValueOnce(response(gistResponse("after")))
+    vi.stubGlobal("fetch", mismatchFetch)
+    await expect(
+      updateGithubGistBackup({
+        content: "expected",
+        config: { token: "token", gistId: "gist-1" },
+      }),
+    ).rejects.toMatchObject({ code: CLOUD_SYNC_ERROR_CODES.REMOTE_CORRUPTED })
+  })
+
+  it("encrypts existing Gist uploads before updating them", async () => {
+    const envelope = { type: "encrypted", ct: "ciphertext" }
+    mockEncryptWebdavBackupContent.mockResolvedValue(envelope)
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(response(gistResponse("before", "rev-1")))
+      .mockResolvedValueOnce(response({}))
+      .mockResolvedValueOnce(
+        response(gistResponse(JSON.stringify(envelope), "rev-2")),
+      )
+    vi.stubGlobal("fetch", fetchMock)
+
+    await expect(
+      uploadGithubGistBackup(
+        '{"version":4}',
+        { token: "token", gistId: "gist-1", encryptionPassword: "password" },
+        "rev-1",
+      ),
+    ).resolves.toMatchObject({ revision: "rev-2" })
+    expect(mockEncryptWebdavBackupContent).toHaveBeenCalledWith({
+      content: '{"version":4}',
+      password: "password",
+    })
+  })
+
   it("requires an encryption password for Gist writes and decrypts encrypted downloads", async () => {
     await expect(
       uploadGithubGistBackup('{"version":4}', {
@@ -261,6 +547,71 @@ describe("githubGistService", () => {
       envelope,
       password: "password",
     })
-    expect(isGithubGistError(new Error("x"))).toBe(false)
+  })
+
+  it("returns plaintext downloads and maps decryption failures", async () => {
+    mockTryParseEncryptedWebdavBackupEnvelope.mockReturnValue(undefined)
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(response(gistResponse('{"version":4}'))),
+    )
+    await expect(
+      downloadGithubGistBackup({
+        token: "token",
+        gistId: "gist-1",
+        encryptionPassword: "password",
+      }),
+    ).resolves.toMatchObject({ content: '{"version":4}' })
+
+    const envelope = { type: "encrypted", ct: "ciphertext" }
+    mockTryParseEncryptedWebdavBackupEnvelope.mockReturnValue(envelope)
+    mockDecryptWebdavBackupEnvelope.mockRejectedValue(new Error("bad password"))
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(response(gistResponse("ciphertext"))),
+    )
+    await expect(
+      downloadGithubGistBackup({
+        token: "token",
+        gistId: "gist-1",
+        encryptionPassword: "password",
+      }),
+    ).rejects.toMatchObject({ code: CLOUD_SYNC_ERROR_CODES.REMOTE_CORRUPTED })
+
+    await expect(
+      downloadGithubGistBackup({
+        token: "token",
+        gistId: "gist-1",
+        encryptionPassword: " ",
+      }),
+    ).rejects.toMatchObject({
+      code: CLOUD_SYNC_ERROR_CODES.ENCRYPTION_REQUIRED,
+    })
+  })
+
+  it("normalizes persisted Gist settings with a stable encryption password", () => {
+    expect(
+      getGithubGistSyncConfig({
+        ...DEFAULT_WEBDAV_SETTINGS,
+        backupEncryptionPassword: "password",
+        githubGist: undefined,
+      }),
+    ).toEqual({ token: "", gistId: "", encryptionPassword: "password" })
+    expect(
+      getGithubGistSyncConfig({
+        ...DEFAULT_WEBDAV_SETTINGS,
+        backupEncryptionPassword: "",
+        githubGist: {
+          token: "token",
+          gistId: "gist-1",
+          gistUrl: "https://gist.github.com/example/gist-1",
+        },
+      }),
+    ).toEqual({
+      token: "token",
+      gistId: "gist-1",
+      gistUrl: "https://gist.github.com/example/gist-1",
+      encryptionPassword: "",
+    })
   })
 })
