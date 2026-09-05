@@ -15,7 +15,10 @@ import { useProductAnalyticsScope } from "~/contexts/ProductAnalyticsScopeContex
 import { UserPreferencesProvider } from "~/contexts/UserPreferencesContext"
 import WebDAVAutoSyncSettings from "~/features/ImportExport/components/WebDAVAutoSyncSettings"
 import WebDAVSettings from "~/features/ImportExport/components/WebDAVSettings"
-import { WEBDAV_TARGET_IDS } from "~/features/ImportExport/searchTargets"
+import {
+  WEBDAV_AUTO_SYNC_TARGET_IDS,
+  WEBDAV_TARGET_IDS,
+} from "~/features/ImportExport/searchTargets"
 import enImportExport from "~/locales/en/importExport.json"
 import es419ImportExport from "~/locales/es-419/importExport.json"
 import jaImportExport from "~/locales/ja/importExport.json"
@@ -618,6 +621,176 @@ describe("WebDAVSettings", () => {
       mockUserPreferences.savePreferencesWithResult,
     ).toHaveBeenNthCalledWith(2, expect.anything(), {
       expectedLastUpdated: 1,
+    })
+  })
+
+  it("exercises GitHub Gist settings, connection, upload, and failure states", async () => {
+    const gistPreferences = createPersistedPreferencesFixture({
+      webdav: {
+        provider: "github_gist",
+        url: "",
+        username: "",
+        password: "",
+        backupEncryptionEnabled: true,
+        backupEncryptionPassword: "stored-secret",
+        githubGist: {
+          token: "saved-token",
+          gistId: "existing-gist",
+          gistUrl: "",
+        },
+        syncData: {
+          accounts: true,
+          bookmarks: true,
+          apiCredentialProfiles: true,
+          preferences: true,
+        },
+        autoSync: false,
+        syncInterval: 3600,
+        syncStrategy: "merge",
+      },
+    })
+    mockUserPreferences.getPreferences.mockResolvedValue(gistPreferences)
+    mockUserPreferences.savePreferencesWithResult.mockResolvedValue({
+      ok: true,
+      preferences: gistPreferences,
+    })
+
+    render(<WebDAVSettings />)
+
+    const gistIdInput = (await screen.findByDisplayValue(
+      "existing-gist",
+    )) as HTMLInputElement
+    fireEvent.change(gistIdInput, { target: { value: "existing-gist-2" } })
+    fireEvent.change(screen.getByDisplayValue("stored-secret"), {
+      target: { value: "new-secret" },
+    })
+
+    clickWebdavAction("webdav-save-config")
+    await waitFor(() => {
+      expect(toast.success).toHaveBeenCalledWith(
+        "settings:messages.updateSuccess",
+      )
+    })
+
+    mockSendWebdavAutoSyncMessage.mockResolvedValueOnce({ success: false })
+    clickWebdavAction("webdav-save-config")
+    await waitFor(() => {
+      expect(loggerMocks.warn).toHaveBeenCalledWith(
+        "Failed to refresh cloud sync schedule after settings save",
+      )
+    })
+
+    mockSendWebdavAutoSyncMessage.mockRejectedValueOnce(
+      new Error("setup failed"),
+    )
+    clickWebdavAction("webdav-save-config")
+    await waitFor(() => {
+      expect(loggerMocks.warn).toHaveBeenCalledWith(
+        "Failed to refresh cloud sync schedule after settings save",
+        expect.any(Error),
+      )
+    })
+
+    clickWebdavAction("webdav-test-connection")
+    await waitFor(() => {
+      expect(mockTestCloudSyncConnection).toHaveBeenCalledWith(
+        expect.objectContaining({
+          provider: "github_gist",
+          githubGist: expect.objectContaining({ gistId: "existing-gist-2" }),
+        }),
+      )
+    })
+    expect(toast.success).toHaveBeenCalledWith(
+      "importExport:webdav.gist.testSuccess",
+    )
+    expect(document.getElementById(WEBDAV_TARGET_IDS.gistUrl)).toHaveAttribute(
+      "href",
+      "https://gist.github.com/existing-gist",
+    )
+
+    clickWebdavAction("webdav-upload-backup")
+    await waitFor(() => {
+      expect(mockDownloadCloudSyncBackup).toHaveBeenCalled()
+      expect(mockUploadCloudSyncBackup).toHaveBeenCalled()
+    })
+    expect(toast.success).toHaveBeenCalledWith(
+      "importExport:webdav.gist.uploadSuccess",
+    )
+
+    mockUploadCloudSyncBackup.mockRejectedValueOnce(
+      new Error("gist upload failed"),
+    )
+    clickWebdavAction("webdav-upload-backup")
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith("gist upload failed")
+    })
+
+    mockTestCloudSyncConnection.mockRejectedValueOnce({})
+    clickWebdavAction("webdav-test-connection")
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith(
+        "importExport:webdav.gist.testFailed",
+      )
+    })
+
+    mockUserPreferences.savePreferencesWithResult.mockRejectedValueOnce(
+      new Error(""),
+    )
+    clickWebdavAction("webdav-save-config")
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith(
+        "settings:messages.saveSettingsFailed",
+      )
+    })
+  })
+
+  it("uses the GitHub Gist auto-sync copy and minimum interval", async () => {
+    const gistPreferences = createPersistedPreferencesFixture({
+      webdav: {
+        provider: "github_gist",
+        autoSync: true,
+        syncInterval: 3600,
+        syncStrategy: "merge",
+        githubGist: { token: "saved-token", gistId: "gist-1" },
+      },
+    })
+    mockUserPreferences.getPreferences.mockResolvedValue(gistPreferences)
+
+    render(<WebDAVAutoSyncSettings />)
+
+    expect(
+      await screen.findByText("importExport:webdav.gist.autoSyncTitle"),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByText("importExport:webdav.gist.autoSyncActionStateSaved"),
+    ).toBeInTheDocument()
+
+    const intervalInput = document.getElementById(
+      WEBDAV_AUTO_SYNC_TARGET_IDS.interval,
+    ) as HTMLInputElement
+    expect(intervalInput).toHaveAttribute("min", "300")
+    fireEvent.change(intervalInput, { target: { value: "60" } })
+    expect(
+      await screen.findByText(
+        "importExport:webdav.gist.autoSyncActionStateUnsaved",
+      ),
+    ).toBeInTheDocument()
+
+    fireEvent.click(
+      document.getElementById(
+        WEBDAV_AUTO_SYNC_TARGET_IDS.saveSettings,
+      ) as HTMLButtonElement,
+    )
+    await waitFor(() => {
+      expect(mockSendWebdavAutoSyncMessage).toHaveBeenCalledWith(
+        WebdavAutoSyncMessageTypes.UpdateSettings,
+        expect.objectContaining({
+          settings: expect.objectContaining({ syncInterval: 300 }),
+        }),
+      )
+      expect(toast.success).toHaveBeenCalledWith(
+        "settings:messages.updateSuccess",
+      )
     })
   })
 

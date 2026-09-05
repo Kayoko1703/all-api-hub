@@ -186,7 +186,19 @@ async function installWebdavBackupRoute(
 
     if (method === "GET" && (isBackupFile || isTempBackupFile)) {
       const body = isTempBackupFile ? stagedBackups.get(url.href) : remoteBackup
-      if (body === undefined || (!isTempBackupFile && !remoteBackup)) {
+      if (!isTempBackupFile && !remoteBackup) {
+        // A missing target is represented by an empty successful response here
+        // so Chromium does not report an expected first-upload 404 as a page
+        // error. `prepareForWrite` maps the empty body to the same
+        // WebdavFileNotFoundError used by real providers.
+        await route.fulfill({
+          status: 204,
+          contentType: "text/plain",
+          body: "",
+        })
+        return
+      }
+      if (body === undefined) {
         await route.fulfill({
           status: 404,
           contentType: "application/json",

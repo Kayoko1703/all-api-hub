@@ -435,6 +435,23 @@ describe("githubGistService", () => {
     ).rejects.toMatchObject({ code: CLOUD_SYNC_ERROR_CODES.REMOTE_UNAVAILABLE })
   })
 
+  it("rejects an empty first Gist backup before making an API request", async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal("fetch", fetchMock)
+    mockEncryptWebdavBackupContent.mockResolvedValue("")
+    vi.spyOn(JSON, "stringify").mockReturnValueOnce(" ")
+
+    await expect(
+      createEncryptedGithubGistBackup("  ", {
+        token: "token",
+        gistId: "",
+        encryptionPassword: "password",
+      }),
+    ).rejects.toMatchObject({ code: CLOUD_SYNC_ERROR_CODES.REMOTE_EMPTY })
+
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
   it("updates an existing Gist only when the revision is unchanged and verifies readback", async () => {
     const fetchMock = vi
       .fn()

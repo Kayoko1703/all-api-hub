@@ -139,4 +139,10 @@ describe("cloudSyncService", () => {
       htmlUrl: remote.htmlUrl,
     })
   })
+
+  it("rejects explicit cloud-backup creation for WebDAV", async () => {
+    await expect(
+      createCloudSyncBackup('{"version":4}', webdavSettings),
+    ).rejects.toThrow("Only GitHub Gist supports explicit creation")
+  })
 })

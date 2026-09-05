@@ -151,6 +151,21 @@ describe("webdavService", () => {
         }),
       ).toThrow("messages:webdav.invalidBackupJson")
     })
+
+    it("rejects empty, non-object, and malformed data sections", () => {
+      for (const content of [
+        "",
+        "null",
+        '{"version":"4.0","accounts":0}',
+        '{"version":"4.0","accounts":{"accounts":{}}}',
+        '{"version":"4.0","accounts":{"deletedEntryRecords":[]}}',
+        '{"version":"4.0","preferences":[]}',
+      ]) {
+        expect(() =>
+          parseWebdavBackupJson(content, { requireBackupShape: true }),
+        ).toThrow("messages:webdav.invalidBackupJson")
+      }
+    })
   })
 
   describe("testWebdavConnection", () => {

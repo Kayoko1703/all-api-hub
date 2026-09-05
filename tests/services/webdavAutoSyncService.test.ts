@@ -956,6 +956,28 @@ describe("WebdavAutoSyncService.syncWithWebdav (selective sync)", () => {
     expect(mockUploadBackup).not.toHaveBeenCalled()
   })
 
+  it("rethrows the provider error for a GitHub Gist connection failure", async () => {
+    const service = createService()
+    mockGetPreferences.mockResolvedValue({
+      webdav: {
+        provider: "github_gist",
+        githubGist: { token: "token", gistId: "gist-1" },
+        syncData: {
+          accounts: true,
+          bookmarks: false,
+          apiCredentialProfiles: false,
+          preferences: false,
+        },
+      },
+    } as any)
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("offline")))
+
+    await expect(service.syncWithWebdav()).rejects.toMatchObject({
+      code: "CLOUD_SYNC_NETWORK",
+    })
+    expect(mockUploadBackup).not.toHaveBeenCalled()
+  })
+
   it("treats a missing remote backup as first upload", async () => {
     const service = createService()
 
@@ -2068,6 +2090,42 @@ describe("WebdavAutoSyncService best-effort upload helpers", () => {
       "webdavAutoSyncBestEffortUpload",
     )
     expect(uploadSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it("uploads a complete local snapshot through the active cloud provider", async () => {
+    const service = createService() as any
+
+    mockAccountStorageExportData.mockResolvedValue({
+      accounts: [{ id: "local-account", updated_at: 10 }],
+      bookmarks: [{ id: "local-bookmark", updated_at: 20 }],
+      pinnedAccountIds: ["local-account"],
+      orderedAccountIds: ["local-account", "local-bookmark"],
+    })
+    mockTagStoreExport.mockResolvedValue({ version: 1, tagsById: {} })
+    mockExportPreferences.mockResolvedValue({ themeMode: "dark" } as any)
+    mockChannelConfigExport.mockResolvedValue({ schemaVersion: 1, configs: {} })
+    mockApiCredentialProfilesExport.mockResolvedValue({
+      version: 2,
+      profiles: [],
+      lastUpdated: 0,
+    })
+    mockDownloadBackup.mockResolvedValue(
+      JSON.stringify({
+        version: BACKUP_VERSION,
+        accounts: { accounts: [], bookmarks: [] },
+      }),
+    )
+
+    await service.uploadLocalSnapshotToWebdav()
+
+    expect(mockUploadBackup).toHaveBeenCalledTimes(1)
+    expect(JSON.parse(mockUploadBackup.mock.calls[0][0])).toMatchObject({
+      version: BACKUP_VERSION,
+      accounts: {
+        accounts: [{ id: "local-account", updated_at: 10 }],
+        bookmarks: [{ id: "local-bookmark", updated_at: 20 }],
+      },
+    })
   })
 
   it("reschedules when a best-effort upload collides with an in-flight sync", async () => {
